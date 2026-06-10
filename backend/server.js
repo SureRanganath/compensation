@@ -3,10 +3,13 @@ const cors = require('cors');
 const helmet = require('helmet');
 const { Pool } = require('pg');
 const rateLimit = require('express-rate-limit');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
 const app = express();
 app.use(helmet());
+app.set('trust proxy', 1); // Trust first proxy (Vite dev, nginx, etc.) for correct req.ip
 
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000').split(',');
 app.use(cors({
@@ -16,6 +19,9 @@ app.use(cors({
 
 app.use(rateLimit({ windowMs: 15*60*1000, max: 100, message: 'Too many requests' }));
 app.use(express.json({ limit: '5mb' }));
+
+const JWT_SECRET = process.env.JWT_SECRET || 'wsw-compensation-system-dev-secret-key-change-in-production';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
 
 const cs = process.env.DATABASE_URL;
 if (!cs) { console.error('DATABASE_URL not set'); process.exit(1); }
@@ -27,13 +33,51 @@ setTimeout(() => {
   pool.connect().then(c => { c.release(); console.log('Reconnected to Postgres'); }).catch(() => {});
 }, 10000);
 
-// Dev auth placeholder
+// ─── JWT Authentication Middleware ────────────────────────────
 const authMw = (req, res, next) => {
   const h = req.headers['authorization'];
   const t = h && h.split(' ')[1];
-  if (!t && process.env.NODE_ENV === 'production') return res.status(401).json({ error: 'Token required' });
+  
+  if (!t) {
+    return res.status(401).json({ error: 'Authentication required. Please provide a valid token.' });
+  }
+  
+  try {
+    const decoded = jwt.verify(t, JWT_SECRET);
+    req.user = decoded; // { id, username, role, display_name }
+    next();
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Token expired. Please sign in again.' });
+    }
+    return res.status(401).json({ error: 'Invalid token. Please sign in again.' });
+  }
+};
+
+// Optional auth — attaches user if token present, but doesn't block
+const optionalAuthMw = (req, res, next) => {
+  const h = req.headers['authorization'];
+  const t = h && h.split(' ')[1];
+  if (t) {
+    try {
+      req.user = jwt.verify(t, JWT_SECRET);
+    } catch (e) { /* ignore invalid tokens */ }
+  }
   next();
 };
+
+// Role-based access middleware factory
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ error: `Access denied. Required role: ${roles.join(' or ')}` });
+    }
+    next();
+  };
+}
 
 // Audit helper
 async function audit(caseId, action, by, oldV, newV) {
@@ -54,6 +98,196 @@ async function genAlert(caseId) {
     }
   } catch(e) { console.error('alert gen err:', e.message); }
 }
+
+// ─── Seed Default Users ─────────────────────────────────────
+async function seedUsers() {
+  try {
+    const existing = await pool.query('SELECT COUNT(*) FROM users');
+    if (parseInt(existing.rows[0].count) > 0) return;
+    
+    const salt = await bcrypt.genSalt(10);
+    const defaultPass = await bcrypt.hash('password123', salt);
+    
+    const users = [
+      { username: 'admin',      display_name: 'Administrator',     email: 'admin@wsw.telangana.gov.in',     role: 'admin' },
+      { username: 'supervisor', display_name: 'Senior Supervisor', email: 'supervisor@wsw.telangana.gov.in', role: 'supervisor' },
+      { username: 'officer',    display_name: 'Case Officer',      email: 'officer@wsw.telangana.gov.in',    role: 'officer' },
+      { username: 'viewer',     display_name: 'Read Only User',    email: 'viewer@wsw.telangana.gov.in',     role: 'viewer' },
+    ];
+    
+    for (const u of users) {
+      await pool.query(
+        'INSERT INTO users (username, password_hash, display_name, email, role) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (username) DO NOTHING',
+        [u.username, defaultPass, u.display_name, u.email, u.role]
+      );
+    }
+    console.log('✅ Default users seeded (password: password123 for all)');
+  } catch (e) {
+    console.error('User seeding error:', e.message);
+  }
+}
+
+// ─── AUTH ENDPOINTS ──────────────────────────────────────────
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required' });
+    }
+    
+    if (username.length < 3) {
+      return res.status(400).json({ error: 'Username must be at least 3 characters' });
+    }
+    
+    // Find user
+    const result = await pool.query(
+      'SELECT id, username, password_hash, display_name, email, role, is_active FROM users WHERE username = $1',
+      [username]
+    );
+    
+    if (result.rows.length === 0) {
+      // Log failed attempt (no user found)
+      await pool.query(
+        'INSERT INTO login_audit (username, ip_address, user_agent, success, failure_reason) VALUES ($1, $2, $3, FALSE, $4)',
+        [username, req.ip, req.headers['user-agent'] || null, 'Invalid username']
+      ).catch(() => {});
+      return res.status(401).json({ error: 'Invalid username or password' });
+    }
+    
+    const user = result.rows[0];
+    
+    if (!user.is_active) {
+      return res.status(403).json({ error: 'Account is deactivated. Contact an administrator.' });
+    }
+    
+    // Verify password
+    const isValid = await bcrypt.compare(password, user.password_hash);
+    
+    if (!isValid) {
+      // Log failed attempt (wrong password)
+      await pool.query(
+        'INSERT INTO login_audit (user_id, username, ip_address, user_agent, success, failure_reason) VALUES ($1, $2, $3, $4, FALSE, $5)',
+        [user.id, username, req.ip, req.headers['user-agent'] || null, 'Invalid password']
+      ).catch(() => {});
+      return res.status(401).json({ error: 'Invalid username or password' });
+    }
+    
+    // Determine token expiry based on rememberMe flag
+    const expiresIn = req.body.rememberMe ? '7d' : JWT_EXPIRES_IN;
+    
+    // Generate JWT
+    const token = jwt.sign(
+      {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        display_name: user.display_name
+      },
+      JWT_SECRET,
+      { expiresIn }
+    );
+    
+    // Update last_login
+    await pool.query('UPDATE users SET last_login = NOW() WHERE id = $1', [user.id]);
+    
+    // Log successful login
+    await pool.query(
+      'INSERT INTO login_audit (user_id, username, ip_address, user_agent, success) VALUES ($1, $2, $3, $4, TRUE)',
+      [user.id, username, req.ip, req.headers['user-agent'] || null]
+    ).catch(() => {});
+    
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        display_name: user.display_name,
+        email: user.email,
+        role: user.role
+      }
+    });
+  } catch (e) {
+    console.error('Login error:', e);
+    res.status(500).json({ error: 'Authentication service unavailable' });
+  }
+});
+
+// Verify current token
+app.get('/api/auth/verify', authMw, (req, res) => {
+  res.json({
+    valid: true,
+    user: {
+      id: req.user.id,
+      username: req.user.username,
+      display_name: req.user.display_name,
+      role: req.user.role
+    }
+  });
+});
+
+// Change password
+app.put('/api/auth/password', authMw, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Current password and new password are required' });
+    }
+    
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters' });
+    }
+    
+    if (newPassword.length > 128) {
+      return res.status(400).json({ error: 'New password must be at most 128 characters' });
+    }
+    
+    // Fetch the user with their current password hash
+    const result = await pool.query(
+      'SELECT id, password_hash FROM users WHERE id = $1',
+      [req.user.id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const user = result.rows[0];
+    
+    // Verify current password
+    const isValid = await bcrypt.compare(currentPassword, user.password_hash);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+    
+    // Ensure new password is different from current
+    const isSame = await bcrypt.compare(newPassword, user.password_hash);
+    if (isSame) {
+      return res.status(400).json({ error: 'New password must be different from current password' });
+    }
+    
+    // Hash and save new password
+    const salt = await bcrypt.genSalt(10);
+    const newHash = await bcrypt.hash(newPassword, salt);
+    
+    await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, req.user.id]);
+    
+    // Log the password change event
+    try {
+      await pool.query(
+        'INSERT INTO login_audit (user_id, username, ip_address, user_agent, success, failure_reason) VALUES ($1, $2, $3, $4, TRUE, $5)',
+        [req.user.id, req.user.username, req.ip, req.headers['user-agent'] || null, 'Password changed']
+      );
+    } catch (e) { /* non-critical */ }
+    
+    res.json({ message: 'Password updated successfully' });
+  } catch (e) {
+    console.error('Password change error:', e);
+    res.status(500).json({ error: 'Failed to update password' });
+  }
+});
 
 // ======== CASES ========
 
@@ -118,7 +352,7 @@ app.put('/api/cases/:id', authMw, async (req, res) => {
   } catch(e) { console.error('PUT err:', e); res.status(500).json({error:'Failed'}); }
 });
 
-app.delete('/api/cases/:id', authMw, async (req, res) => {
+app.delete('/api/cases/:id', authMw, requireRole('admin'), async (req, res) => {
   try {
     const {id}=req.params;
     const r = await pool.query(`UPDATE cases SET status='CLOSED',updated_at=NOW() WHERE id=$1 RETURNING id`, [id]);
@@ -244,7 +478,10 @@ app.use((err, req, res, next) => { console.error('Err:', err); res.status(500).j
 
 const PORT = process.env.PORT || 5000;
 const ENV = process.env.NODE_ENV || 'development';
-const server = app.listen(PORT, () => console.log(`Backend on port ${PORT} (${ENV})`));
+const server = app.listen(PORT, async () => {
+  console.log(`Backend on port ${PORT} (${ENV})`);
+  await seedUsers();
+});
 
 process.on('SIGTERM', ()=>{ server.close(()=>{ pool.end(); process.exit(0); }); });
 process.on('SIGINT', ()=>{ server.close(()=>{ pool.end(); process.exit(0); }); });

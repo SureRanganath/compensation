@@ -5,10 +5,32 @@
 
 const API_BASE = '/api';
 
+let cachedToken = null;
+
+export function getAuthToken() {
+  return cachedToken || sessionStorage.getItem('auth_token');
+}
+
+export function setAuthToken(token) {
+  cachedToken = token;
+  if (token) {
+    sessionStorage.setItem('auth_token', token);
+  } else {
+    sessionStorage.removeItem('auth_token');
+  }
+}
+
+export function clearAuth() {
+  cachedToken = null;
+  sessionStorage.removeItem('auth_token');
+  sessionStorage.removeItem('auth_user');
+  sessionStorage.removeItem('auth_role');
+}
+
 async function request(path, opts = {}) {
   try {
     const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
-    const token = sessionStorage.getItem('auth_token');
+    const token = getAuthToken();
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
     const res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
@@ -17,6 +39,14 @@ async function request(path, opts = {}) {
       const text = await res.text();
       let msg = 'Unknown error';
       try { const d = JSON.parse(text); msg = d.error || msg; } catch (e) { msg = text || res.statusText; }
+      
+      // If 401 (unauthorized), clear auth and let the app redirect
+      if (res.status === 401) {
+        clearAuth();
+        // Dispatch custom event so App can react
+        window.dispatchEvent(new CustomEvent('auth:expired'));
+      }
+      
       throw new Error(`API Error [${res.status}]: ${msg}`);
     }
     return await res.json();
@@ -130,9 +160,35 @@ export async function getDistricts() {
   return request('/districts');
 }
 
+// ─── AUTH ────────────────────────────────────────────────────
+
+export async function login(username, password, rememberMe = false) {
+  const res = await request('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username, password, rememberMe })
+  });
+  // Store the token
+  setAuthToken(res.token);
+  sessionStorage.setItem('auth_user', JSON.stringify(res.user));
+  sessionStorage.setItem('auth_role', res.user.role);
+  return res;
+}
+
+export async function verifyToken() {
+  return request('/auth/verify');
+}
+
+export async function changePassword(currentPassword, newPassword) {
+  return request('/auth/password', {
+    method: 'PUT',
+    body: JSON.stringify({ currentPassword, newPassword })
+  });
+}
+
 // ─── EXPORTS ──────────────────────────────────────────────────
 
 const api = {
+  login, verifyToken, changePassword,
   getCases, getCase, createCase, updateCase, deleteCase,
   getCaseSteps, completeStep, updateStep,
   getDashboardStats,
