@@ -16,6 +16,9 @@ export default function CaseList() {
   const [statusFilter, setStatusFilter] = useState('');
   const [districts, setDistricts] = useState([]);
   const [districtFilter, setDistrictFilter] = useState('');
+  const [deletingId, setDeletingId] = useState(null);
+  const role = sessionStorage.getItem('auth_role') || 'viewer';
+  const isAdmin = role === 'admin';
   const nav = useNavigate();
 
   const fetchCases = useCallback(async (p = 1) => {
@@ -39,15 +42,32 @@ export default function CaseList() {
     (async () => { try { const d = await api.getDistricts(); setDistricts(d); } catch (e) {} })();
   }, []);
 
+  const handleDelete = async (e, caseId) => {
+    e.stopPropagation();
+    if (!window.confirm('Permanently delete this case? This action cannot be undone. All case data, steps, notes, alerts, and audit logs will be removed.')) return;
+    setDeletingId(caseId);
+    try {
+      await api.deleteCase(caseId);
+      setCases(prev => prev.filter(c => c.id !== caseId));
+      setTotal(prev => prev - 1);
+    } catch (err) {
+      setError(`Failed to delete: ${err.message}`);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   const totalPages = Math.ceil(total / 20);
 
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-slate-800">Case Management</h1>
-        <button onClick={() => nav('/cases/new')} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition">
-          + New Case
-        </button>
+        {isAdmin && (
+          <button onClick={() => nav('/cases/new')} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition">
+            + New Case
+          </button>
+        )}
       </div>
 
       {error && <div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded-lg mb-4 text-sm">{error}</div>}
@@ -99,6 +119,7 @@ export default function CaseList() {
                     <th className="px-4 py-3 font-medium">Progress</th>
                     <th className="px-4 py-3 font-medium">Status</th>
                     <th className="px-4 py-3 font-medium">Updated</th>
+                    {isAdmin && <th className="px-4 py-3 font-medium">Actions</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -125,6 +146,14 @@ export default function CaseList() {
                         <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${statusColors[c.status] || 'bg-gray-100 text-gray-600'}`}>{c.status}</span>
                       </td>
                       <td className="px-4 py-3 text-slate-400 text-xs">{c.updated_at ? new Date(c.updated_at).toLocaleDateString() : '-'}</td>
+                      {isAdmin && (
+                        <td className="px-4 py-3">
+                          <button onClick={e => handleDelete(e, c.id)} disabled={deletingId === c.id}
+                            className="text-xs font-medium text-red-600 hover:text-red-800 hover:underline transition disabled:opacity-40">
+                            {deletingId === c.id ? 'Deleting...' : 'Delete'}
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>

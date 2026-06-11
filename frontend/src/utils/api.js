@@ -89,6 +89,11 @@ export async function updateCase(id, data) {
   return request(`/cases/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(data) });
 }
 
+export async function markCaseAsPaid(id) {
+  if (!id) throw new Error('Case ID required');
+  return request(`/cases/${encodeURIComponent(id)}/mark-paid`, { method: 'POST' });
+}
+
 export async function deleteCase(id) {
   if (!id) throw new Error('Case ID required');
   return request(`/cases/${encodeURIComponent(id)}`, { method: 'DELETE' });
@@ -106,6 +111,13 @@ export async function completeStep(caseId, stepNumber, data = {}) {
   return request(`/cases/${encodeURIComponent(caseId)}/steps/${stepNumber}/complete`, {
     method: 'POST',
     body: JSON.stringify(data)
+  });
+}
+
+export async function revertStep(caseId, stepNumber) {
+  if (!caseId || !stepNumber) throw new Error('Case ID and step number required');
+  return request(`/cases/${encodeURIComponent(caseId)}/steps/${stepNumber}/revert`, {
+    method: 'POST'
   });
 }
 
@@ -189,8 +201,8 @@ export async function changePassword(currentPassword, newPassword) {
 
 const api = {
   login, verifyToken, changePassword,
-  getCases, getCase, createCase, updateCase, deleteCase,
-  getCaseSteps, completeStep, updateStep,
+  getCases, getCase, createCase, updateCase, deleteCase, markCaseAsPaid,
+  getCaseSteps, completeStep, revertStep, updateStep,
   getDashboardStats,
   getAlerts, resolveAlert,
   getWorkflowSteps,

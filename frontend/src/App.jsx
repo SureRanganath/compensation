@@ -226,7 +226,7 @@ function LoginPage({ onLogin }) {
 // ─── Layout ──────────────────────────────────────────────────
 const navItems = [
   { label: 'Dashboard',     path: '/',           icon: '📊', minRole: 'viewer' },
-  { label: 'Cases',         path: '/cases',      icon: '📋', minRole: 'officer' },
+  { label: 'Cases',         path: '/cases',      icon: '📋', minRole: 'viewer' },
   { label: 'Alerts',        path: '/alerts',     icon: '⚠️', minRole: 'supervisor' },
   { label: 'Workflow',      path: '/workflow',   icon: '🔄', minRole: 'viewer' },
 ];

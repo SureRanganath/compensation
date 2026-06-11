@@ -25,11 +25,11 @@ export default function Dashboard() {
   if (error) return <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-lg">{error}</div>;
 
   const statusColors = {
-    ACTIVE: 'bg-amber-100 text-amber-800',
-    STALLED: 'bg-red-100 text-red-800',
-    PAID: 'bg-green-100 text-green-800',
-    CLOSED: 'bg-gray-100 text-gray-600',
-    UNDER_REVIEW: 'bg-purple-100 text-purple-800',
+    ACTIVE: 'bg-amber-100 text-amber-800 border-amber-300',
+    STALLED: 'bg-red-100 text-red-800 border-red-300',
+    PAID: 'bg-green-100 text-green-800 border-green-300',
+    CLOSED: 'bg-gray-100 text-gray-600 border-gray-300',
+    UNDER_REVIEW: 'bg-purple-100 text-purple-800 border-purple-300',
   };
 
   const findStatusCount = (status) => {
@@ -128,7 +128,7 @@ export default function Dashboard() {
                     <td className="py-2.5">Step {c.current_step}/9</td>
                     <td className="py-2.5">{c.district_name}</td>
                     <td className="py-2.5">
-                      <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${statusColors[c.status] || 'bg-gray-100 text-gray-600'}`}>{c.status}</span>
+                      <span className={`text-sm px-3 py-1.5 rounded-full font-semibold border ${statusColors[c.status] || 'bg-gray-100 text-gray-600 border-gray-200'}`}>{c.status}</span>
                     </td>
                   </tr>
                 ))}

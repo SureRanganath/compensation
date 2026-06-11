@@ -323,7 +323,7 @@ app.get('/api/cases/:id', authMw, async (req, res) => {
   } catch(e) { console.error('GET /api/cases/:id err:', e); res.status(500).json({error:'Failed'}); }
 });
 
-app.post('/api/cases', authMw, async (req, res) => {
+app.post('/api/cases', authMw, requireRole('admin'), async (req, res) => {
   try {
     const {fir_number,cc_number,case_type,district_id,data_source,date_of_fir,victim_age,victim_gender,eligible_for_compensation,comp_type,comp_amount_approved,responsible_officer,responsible_agency,notes} = req.body;
     if (!fir_number||!case_type||!data_source||!date_of_fir) return res.status(400).json({error:'Missing required fields'});
@@ -335,7 +335,7 @@ app.post('/api/cases', authMw, async (req, res) => {
   } catch(e) { console.error('POST /api/cases err:', e); if (e.code==='23505') return res.status(409).json({error:'FIR exists'}); res.status(500).json({error:'Failed'}); }
 });
 
-app.put('/api/cases/:id', authMw, async (req, res) => {
+app.put('/api/cases/:id', authMw, requireRole('admin'), async (req, res) => {
   try {
     const {id}=req.params;
     const ALLOW = ['fir_number','cc_number','case_type','district_id','data_source','date_of_fir','victim_age','victim_gender','eligible_for_compensation','comp_type','comp_amount_approved','comp_amount_disbursed','current_step','status','responsible_officer','responsible_agency','notes'];
@@ -355,11 +355,36 @@ app.put('/api/cases/:id', authMw, async (req, res) => {
 app.delete('/api/cases/:id', authMw, requireRole('admin'), async (req, res) => {
   try {
     const {id}=req.params;
-    const r = await pool.query(`UPDATE cases SET status='CLOSED',updated_at=NOW() WHERE id=$1 RETURNING id`, [id]);
+    // Delete child records first to avoid foreign key violations
+    await pool.query('DELETE FROM audit_log WHERE case_id=$1', [id]);
+    await pool.query('DELETE FROM alerts WHERE case_id=$1', [id]);
+    await pool.query('DELETE FROM case_step_history WHERE case_id=$1', [id]);
+    // Then delete the case itself
+    const r = await pool.query('DELETE FROM cases WHERE id=$1 RETURNING id,fir_number', [id]);
     if (!r.rows.length) return res.status(404).json({error:'Not found'});
-    await audit(id, 'CASE_CLOSED', 'system', null, {status:'CLOSED'});
-    res.json({message:'Closed'});
+    console.log(`Case ${r.rows[0].fir_number} (${id}) permanently deleted by ${req.user?.username || 'unknown'}`);
+    res.json({message:'Case permanently deleted'});
   } catch(e) { console.error('DELETE err:', e); res.status(500).json({error:'Failed'}); }
+});
+
+// Manually mark a case as PAID (requires all 9 steps to be complete)
+app.post('/api/cases/:id/mark-paid', authMw, requireRole('admin'), async (req, res) => {
+  try {
+    const {id}=req.params;
+    const c = await pool.query('SELECT * FROM cases WHERE id=$1', [id]);
+    if (!c.rows.length) return res.status(404).json({error:'Not found'});
+    if (c.rows[0].status === 'PAID') return res.status(409).json({error:'Case is already marked as PAID'});
+    
+    // Verify all 9 steps are completed
+    const completedCount = await pool.query('SELECT COUNT(*) FROM case_step_history WHERE case_id=$1 AND completed=TRUE', [id]);
+    if (parseInt(completedCount.rows[0].count) < 9) {
+      return res.status(400).json({error:'All 9 steps must be completed before marking as PAID'});
+    }
+    
+    await pool.query("UPDATE cases SET status='PAID',updated_at=NOW() WHERE id=$1", [id]);
+    await audit(id, 'CASE_MARKED_PAID', req.user?.username || 'system', {status: c.rows[0].status}, {status:'PAID'});
+    res.json({message:'Case marked as PAID', status:'PAID'});
+  } catch(e) { console.error('POST mark-paid err:', e); res.status(500).json({error:'Failed'}); }
 });
 
 // ======== STEPS ========
@@ -372,9 +397,9 @@ app.get('/api/cases/:id/steps', authMw, async (req, res) => {
   } catch(e) { console.error('GET steps err:', e); res.status(500).json({error:'Failed'}); }
 });
 
-app.post('/api/cases/:id/steps/:stepNumber/complete', authMw, async (req, res) => {
+app.post('/api/cases/:id/steps/:stepNumber/complete', authMw, requireRole('admin'), async (req, res) => {
   try {
-    const {id,stepNumber}=req.params; const {notes,completed_by,documents_received}=req.body;
+    const {id,stepNumber}=req.params; const {notes,completed_by,documents_received,comp_amount_approved}=req.body;
     const sn = parseInt(stepNumber);
     const ex = await pool.query('SELECT * FROM case_step_history WHERE case_id=$1 AND step_number=$2', [id, sn]);
     if (ex.rows.length>0 && ex.rows[0].completed) return res.status(409).json({error:'Already completed'});
@@ -385,13 +410,62 @@ app.post('/api/cases/:id/steps/:stepNumber/complete', authMw, async (req, res) =
     }
     const next = Math.min(sn+1, 9);
     await pool.query('UPDATE cases SET current_step=$1,updated_at=NOW() WHERE id=$2', [next, id]);
+
+    // Update approved compensation amount for steps 5, 6, 7 (amount-setting milestones)
+    if (comp_amount_approved !== undefined && comp_amount_approved !== null && [5,6,7].includes(sn)) {
+      const amount = parseFloat(comp_amount_approved);
+      if (!isNaN(amount) && amount >= 0) {
+        const oldRow = await pool.query('SELECT comp_amount_approved FROM cases WHERE id=$1', [id]);
+        await pool.query('UPDATE cases SET comp_amount_approved=$1,updated_at=NOW() WHERE id=$2', [amount, id]);
+        await audit(id, 'AMOUNT_UPDATED', completed_by||'system', {comp_amount_approved: oldRow.rows[0]?.comp_amount_approved}, {comp_amount_approved: amount, updated_at_step: sn});
+      }
+    }
+
+    // Auto-update status to PAID if all 9 steps are now completed
+    const completedCount = await pool.query('SELECT COUNT(*) FROM case_step_history WHERE case_id=$1 AND completed=TRUE', [id]);
+    if (parseInt(completedCount.rows[0].count) >= 9) {
+      await pool.query("UPDATE cases SET status='PAID',updated_at=NOW() WHERE id=$1 AND status!='PAID'", [id]);
+      await audit(id, 'CASE_MARKED_PAID', completed_by||'system', null, {reason: 'All 9 steps completed'});
+    }
+
     await audit(id, `STEP_${sn}_COMPLETED`, completed_by||'system', null, {step:sn});
     await genAlert(id);
     res.json({message:`Step ${sn} complete`, current_step:next});
   } catch(e) { console.error('POST step complete err:', e); res.status(500).json({error:'Failed'}); }
 });
 
-app.put('/api/cases/:id/steps/:stepNumber', authMw, async (req, res) => {
+app.post('/api/cases/:id/steps/:stepNumber/revert', authMw, requireRole('admin'), async (req, res) => {
+  try {
+    const {id, stepNumber} = req.params;
+    const sn = parseInt(stepNumber);
+
+    // Check step exists and is completed
+    const ex = await pool.query('SELECT * FROM case_step_history WHERE case_id=$1 AND step_number=$2', [id, sn]);
+    if (!ex.rows.length || !ex.rows[0].completed) {
+      return res.status(400).json({error: 'Step not completed or not found'});
+    }
+
+    // Revert this step and all subsequent steps (mark them as not completed)
+    await pool.query('UPDATE case_step_history SET completed=FALSE,completed_at=NULL,completed_by=NULL WHERE case_id=$1 AND step_number>=$2', [id, sn]);
+
+    // Update current_step back to the reverted step
+    await pool.query('UPDATE cases SET current_step=$1,updated_at=NOW() WHERE id=$2', [sn, id]);
+
+    // If the case was PAID, revert it back to ACTIVE since steps are no longer all complete
+    if (ex.rows[0].completed) {
+      await pool.query("UPDATE cases SET status='ACTIVE',updated_at=NOW() WHERE id=$1 AND status='PAID'", [id]);
+    }
+
+    await audit(id, `STEP_${sn}_REVERTED`, req.user?.username || 'system', null, {step: sn, action: 'reverted'});
+
+    res.json({message: `Step ${sn} reverted`, current_step: sn});
+  } catch(e) {
+    console.error('POST step revert err:', e);
+    res.status(500).json({error: 'Failed to revert step'});
+  }
+});
+
+app.put('/api/cases/:id/steps/:stepNumber', authMw, requireRole('admin'), async (req, res) => {
   try {
     const {id,stepNumber}=req.params; const {notes,delay_reason,documents_received}=req.body;
     const ex = await pool.query('SELECT * FROM case_step_history WHERE case_id=$1 AND step_number=$2', [id, parseInt(stepNumber)]);
