@@ -27,9 +27,13 @@ export default function CaseDetail() {
   const [stepNotes, setStepNotes] = useState('');
   const [stepAmount, setStepAmount] = useState('');
   const [alertMsg, setAlertMsg] = useState('');
+  const [supervisorNoteInput, setSupervisorNoteInput] = useState('');
+  const [savingSupervisorNote, setSavingSupervisorNote] = useState(null);
+  const [deletingSupervisorNote, setDeletingSupervisorNote] = useState(null);
 
   const role = sessionStorage.getItem('auth_role') || 'viewer';
   const isAdmin = role === 'admin';
+  const isSupervisor = role === 'supervisor';
   const caseTypes = ['POCSO', 'RAPE', 'ITPA', 'OTHER_CAW', 'CHILD_VICTIM'];
   const dataSources = ['BHAROSA', 'AHTU_PMU', 'ACP_LAW_ORDER', 'DLSA', 'OTHER'];
   const compTypes = ['', 'INTERIM', 'FINAL', 'SPECIAL', 'INTERIM_AND_FINAL'];
@@ -108,6 +112,35 @@ export default function CaseDetail() {
       setAlertMsg(`Error: ${e.message}`);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSaveSupervisorNotes = async (stepNum) => {
+    if (!supervisorNoteInput.trim()) return setAlertMsg('Please enter some notes before saving.');
+    setSavingSupervisorNote(stepNum);
+    try {
+      await api.updateSupervisorNotes(id, stepNum, supervisorNoteInput.trim());
+      setAlertMsg('Observation notes saved for Step ' + stepNum);
+      setSupervisorNoteInput('');
+      await fetchCase();
+    } catch (e) {
+      setAlertMsg(`Error saving notes: ${e.message}`);
+    } finally {
+      setSavingSupervisorNote(null);
+    }
+  };
+
+  const handleDeleteSupervisorNotes = async (stepNum) => {
+    if (!window.confirm(`Delete the supervisor notes for Step ${stepNum}? This cannot be undone.`)) return;
+    setDeletingSupervisorNote(stepNum);
+    try {
+      await api.deleteSupervisorNotes(id, stepNum);
+      setAlertMsg('Supervisor notes deleted for Step ' + stepNum);
+      await fetchCase();
+    } catch (e) {
+      setAlertMsg(`Error deleting notes: ${e.message}`);
+    } finally {
+      setDeletingSupervisorNote(null);
     }
   };
 
@@ -250,6 +283,7 @@ export default function CaseDetail() {
                       {step.delay_reason && (
                         <div className="text-xs text-red-500 mt-1">Delay: {step.delay_reason}</div>
                       )}
+                      {/* Admin: Complete step with notes */}
                       {isCurrent && !isDone && isAdmin && (
                         <div className="mt-3 space-y-2">
                           {[5,6,7].includes(step.step_number) && (
@@ -276,7 +310,34 @@ export default function CaseDetail() {
                           </button>
                         </div>
                       )}
-                      {isCurrent && !isDone && !isAdmin && (
+
+                      {/* Supervisor: Add observation notes without completing */}
+                      {isCurrent && !isDone && isSupervisor && (
+                        <div className="mt-3 space-y-2">
+                          <label className="block text-xs font-medium text-slate-500 mb-1">
+                            Add Observation Notes
+                          </label>
+                          <textarea value={supervisorNoteInput} onChange={e => setSupervisorNoteInput(e.target.value)}
+                            placeholder="Enter your observations, concerns, or recommendations for this step..."
+                            className="w-full px-3 py-2 rounded-lg border border-purple-300 text-sm outline-none focus:ring-2 focus:ring-purple-500" rows={2} />
+                          <button onClick={() => handleSaveSupervisorNotes(step.step_number)} disabled={savingSupervisorNote === step.step_number}
+                            className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-1.5 rounded-lg text-sm font-medium transition disabled:opacity-50 flex items-center gap-1.5">
+                            {savingSupervisorNote === step.step_number ? (
+                              <>
+                                <svg className="animate-spin w-3.5 h-3.5" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" /></svg>
+                                Saving...
+                              </>
+                            ) : (
+                              <>
+                                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M7.5 7.5h-.75A2.25 2.25 0 004.5 9.75v7.5a2.25 2.25 0 002.25 2.25h7.5a2.25 2.25 0 002.25-2.25v-7.5a2.25 2.25 0 00-2.25-2.25h-.75m0-3l-3-3m0 0l-3 3m3-3v11.25m6-2.25h.75a2.25 2.25 0 012.25 2.25v7.5a2.25 2.25 0 01-2.25 2.25h-7.5a2.25 2.25 0 01-2.25-2.25v-7.5a2.25 2.25 0 012.25-2.25h.75" /></svg>
+                                Save Notes
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      )}
+
+                      {isCurrent && !isDone && !isAdmin && !isSupervisor && (
                         <div className="mt-2 text-xs text-slate-400 italic">
                           Waiting for admin to mark this step as complete.
                         </div>
@@ -457,10 +518,10 @@ export default function CaseDetail() {
           </div>
 
           {/* Step Notes — consolidated view of all notes from every step */}
-          {steps.some(s => s.step_notes) && (
+          {(steps.some(s => s.step_notes) || steps.some(s => s.supervisor_notes)) && (
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
               <h3 className="font-semibold text-slate-700 mb-3">Step Notes</h3>
-              <div className="space-y-3 max-h-64 overflow-y-auto">
+              <div className="space-y-3 max-h-80 overflow-y-auto">
                 {steps.filter(s => s.step_notes).map(step => (
                   <div key={step.step_number} className="text-sm border-l-2 border-blue-400 pl-3">
                     <div className="flex items-center gap-2">
@@ -470,6 +531,31 @@ export default function CaseDetail() {
                       )}
                     </div>
                     <div className="text-slate-600 mt-0.5 whitespace-pre-wrap">{step.step_notes}</div>
+                  </div>
+                ))}
+                {/* Supervisor Notes */}
+                {steps.filter(s => s.supervisor_notes).map(step => (
+                  <div key={`sup-${step.step_number}`} className="text-sm border-l-2 border-purple-400 pl-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-slate-700">Step {step.step_number}: {step.step_name}</span>
+                        <span className="text-xs px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 font-medium">Supervisor Note</span>
+                        {step.supervisor_notes_by && (
+                          <span className="text-xs text-purple-500">by {step.supervisor_notes_by}</span>
+                        )}
+                      </div>
+                      {isAdmin && (
+                        <button
+                          onClick={() => handleDeleteSupervisorNotes(step.step_number)}
+                          disabled={deletingSupervisorNote === step.step_number}
+                          className="text-xs font-medium text-red-500 hover:text-red-700 hover:underline transition shrink-0 disabled:opacity-40"
+                          title="Delete supervisor notes"
+                        >
+                          {deletingSupervisorNote === step.step_number ? 'Deleting...' : 'Delete'}
+                        </button>
+                      )}
+                    </div>
+                    <div className="text-slate-600 mt-0.5 whitespace-pre-wrap">{step.supervisor_notes}</div>
                   </div>
                 ))}
               </div>

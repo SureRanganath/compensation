@@ -1,6 +1,7 @@
 /**
  * API Utility — Compensation Monitoring System
  * Matches all backend REST endpoints
+ * Features automatic retry with exponential backoff for 429 (Too Many Requests).
  */
 
 const API_BASE = '/api';
@@ -27,7 +28,53 @@ export function clearAuth() {
   sessionStorage.removeItem('auth_role');
 }
 
-async function request(path, opts = {}) {
+// ─── Retry Configuration ─────────────────────────────────────
+const RETRY_CONFIG = {
+  maxRetries: 3,          // Max number of retry attempts
+  baseDelayMs: 1000,      // Initial delay before first retry (doubles each attempt)
+  maxDelayMs: 10000,      // Cap on delay to avoid excessive waiting
+  jitter: true            // Add random jitter (+/- 25%) to prevent thundering herd
+};
+
+/**
+ * Sleep for `ms` milliseconds.
+ */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Calculate delay for a given retry attempt with optional jitter.
+ * Uses exponential backoff: baseDelay * 2^(attempt-1), capped at maxDelay.
+ */
+function getDelay(attempt) {
+  const delay = Math.min(
+    RETRY_CONFIG.baseDelayMs * Math.pow(2, attempt - 1),
+    RETRY_CONFIG.maxDelayMs
+  );
+  if (RETRY_CONFIG.jitter) {
+    // Add +/- 25% random jitter
+    const jitterFactor = 0.75 + Math.random() * 0.5;
+    return Math.round(delay * jitterFactor);
+  }
+  return delay;
+}
+
+/**
+ * Parse the Retry-After header value (seconds or HTTP-date).
+ * Returns delay in milliseconds, or null if unparseable.
+ */
+function parseRetryAfter(headerValue) {
+  if (!headerValue) return null;
+  const seconds = parseInt(headerValue, 10);
+  if (!isNaN(seconds) && seconds >= 0) {
+    return seconds * 1000;
+  }
+  // Could try parsing HTTP-date here, but seconds is the common format
+  return null;
+}
+
+async function request(path, opts = {}, attempt = 1) {
   try {
     const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
     const token = getAuthToken();
@@ -40,19 +87,51 @@ async function request(path, opts = {}) {
       let msg = 'Unknown error';
       try { const d = JSON.parse(text); msg = d.error || msg; } catch (e) { msg = text || res.statusText; }
       
-      // If 401 (unauthorized), clear auth and let the app redirect
+      // If 401 (unauthorized), clear auth and let the app redirect — no retry
       if (res.status === 401) {
         clearAuth();
-        // Dispatch custom event so App can react
         window.dispatchEvent(new CustomEvent('auth:expired'));
+        throw new Error(`API Error [${res.status}]: ${msg}`);
+      }
+
+      // If 429 (Too Many Requests), retry with exponential backoff
+      if (res.status === 429 && attempt <= RETRY_CONFIG.maxRetries) {
+        // Prefer server-provided Retry-After header, otherwise use our backoff.
+        // When the server specifies a wait time, we use the longer of the server's
+        // instruction and our own backoff to avoid burning retries too early.
+        const retryAfterMs = parseRetryAfter(res.headers.get('Retry-After'));
+        const backoffMs = getDelay(attempt);
+        const delayMs = retryAfterMs !== null
+          ? Math.max(retryAfterMs, backoffMs)
+          : backoffMs;
+
+        console.warn(
+          `API 429 [${path}]: attempt ${attempt}/${RETRY_CONFIG.maxRetries}, ` +
+          `retrying in ${Math.round(delayMs / 1000)}s...`
+        );
+
+        await sleep(delayMs);
+        return request(path, opts, attempt + 1);
       }
       
       throw new Error(`API Error [${res.status}]: ${msg}`);
     }
     return await res.json();
   } catch (error) {
+    // If it's our own API Error, re-throw it
     if (error.message.startsWith('API Error')) throw error;
-    console.error('Request failed:', error);
+    // If we haven't exhausted retries and it looks like a transient network error,
+    // retry (e.g., connection reset, DNS failure, etc.)
+    if (attempt <= RETRY_CONFIG.maxRetries) {
+      console.warn(
+        `Network error [${path}]: attempt ${attempt}/${RETRY_CONFIG.maxRetries}, retrying...`,
+        error.message
+      );
+      const delayMs = getDelay(attempt);
+      await sleep(delayMs);
+      return request(path, opts, attempt + 1);
+    }
+    console.error('Request failed after retries:', error);
     throw new Error('Network error — is the backend running?');
   }
 }
@@ -159,6 +238,23 @@ export async function getWorkflowSteps() {
   return request('/workflow/steps');
 }
 
+// ─── SUPERVISOR NOTES ────────────────────────────────────────
+
+export async function updateSupervisorNotes(caseId, stepNumber, notes) {
+  if (!caseId || !stepNumber) throw new Error('Case ID and step number required');
+  return request(`/cases/${encodeURIComponent(caseId)}/steps/${stepNumber}/supervisor-notes`, {
+    method: 'PUT',
+    body: JSON.stringify({ notes })
+  });
+}
+
+export async function deleteSupervisorNotes(caseId, stepNumber) {
+  if (!caseId || !stepNumber) throw new Error('Case ID and step number required');
+  return request(`/cases/${encodeURIComponent(caseId)}/steps/${stepNumber}/supervisor-notes`, {
+    method: 'DELETE'
+  });
+}
+
 // ─── SEARCH ───────────────────────────────────────────────────
 
 export async function searchCases(q) {
@@ -207,6 +303,7 @@ const api = {
   getAlerts, resolveAlert,
   getWorkflowSteps,
   searchCases,
-  getDistricts
+  getDistricts,
+  updateSupervisorNotes, deleteSupervisorNotes
 };
 export default api;

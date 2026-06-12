@@ -17,7 +17,16 @@ app.use(cors({
   credentials: true, methods: ['GET','POST','PUT','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization']
 }));
 
-app.use(rateLimit({ windowMs: 15*60*1000, max: 100, message: 'Too many requests' }));
+// Rate limiting — global limiter with configurable window and max via env vars
+const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || String(15*60*1000), 10);  // default: 15 minutes
+const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX || '200', 10);  // default: 200 requests per window
+app.use(rateLimit({
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX,
+  message: 'Too many requests, please try again later.',
+  standardHeaders: true,   // Return rate limit info in RateLimit-* headers
+  legacyHeaders: false,     // Disable X-RateLimit-* headers
+}));
 app.use(express.json({ limit: '5mb' }));
 
 const JWT_SECRET = process.env.JWT_SECRET || 'wsw-compensation-system-dev-secret-key-change-in-production';
@@ -316,7 +325,7 @@ app.get('/api/cases/:id', authMw, async (req, res) => {
     const {id}=req.params;
     const c = await pool.query(`SELECT c.*, d.name district_name FROM cases c LEFT JOIN districts d ON d.id=c.district_id WHERE c.id=$1`, [id]);
     if (!c.rows.length) return res.status(404).json({error:'Not found'});
-    const steps = await pool.query(`SELECT ws.*,csh.completed,csh.completed_at,csh.completed_by,csh.notes step_notes,csh.delay_reason,csh.documents_received FROM workflow_steps ws LEFT JOIN case_step_history csh ON csh.case_id=$1 AND csh.step_number=ws.step_number ORDER BY ws.step_number`, [id]);
+    const steps = await pool.query(`SELECT ws.*,csh.completed,csh.completed_at,csh.completed_by,csh.notes step_notes,csh.delay_reason,csh.documents_received,csh.supervisor_notes,csh.supervisor_notes_by FROM workflow_steps ws LEFT JOIN case_step_history csh ON csh.case_id=$1 AND csh.step_number=ws.step_number ORDER BY ws.step_number`, [id]);
     const alerts = await pool.query(`SELECT * FROM alerts WHERE case_id=$1 AND is_resolved=FALSE ORDER BY created_at DESC`, [id]);
     const auditLog = await pool.query(`SELECT * FROM audit_log WHERE case_id=$1 ORDER BY created_at DESC LIMIT 20`, [id]);
     res.json({case:c.rows[0], steps:steps.rows, alerts:alerts.rows, auditLog:auditLog.rows});
@@ -392,7 +401,7 @@ app.post('/api/cases/:id/mark-paid', authMw, requireRole('admin'), async (req, r
 app.get('/api/cases/:id/steps', authMw, async (req, res) => {
   try {
     const {id}=req.params;
-    const r = await pool.query(`SELECT ws.*,csh.completed,csh.completed_at,csh.completed_by,csh.notes step_notes,csh.delay_reason,csh.documents_received FROM workflow_steps ws LEFT JOIN case_step_history csh ON csh.case_id=$1 AND csh.step_number=ws.step_number ORDER BY ws.step_number`, [id]);
+    const r = await pool.query(`SELECT ws.*,csh.completed,csh.completed_at,csh.completed_by,csh.notes step_notes,csh.delay_reason,csh.documents_received,csh.supervisor_notes,csh.supervisor_notes_by FROM workflow_steps ws LEFT JOIN case_step_history csh ON csh.case_id=$1 AND csh.step_number=ws.step_number ORDER BY ws.step_number`, [id]);
     res.json(r.rows);
   } catch(e) { console.error('GET steps err:', e); res.status(500).json({error:'Failed'}); }
 });
@@ -545,6 +554,85 @@ app.get('/api/search', authMw, async (req, res) => {
 app.get('/api/districts', authMw, async (req, res) => {
   try { const r = await pool.query('SELECT id,name FROM districts ORDER BY name'); res.json(r.rows); }
   catch(e) { console.error('GET districts err:', e); res.status(500).json({error:'Failed'}); }
+});
+
+// ======== SUPERVISOR NOTES ========
+
+// Supervisor/Admin: Add or update supervisor observation notes on a step
+app.put('/api/cases/:id/steps/:stepNumber/supervisor-notes', authMw, async (req, res) => {
+  try {
+    const {id, stepNumber} = req.params;
+    const { notes } = req.body;
+
+    // Only allow supervisor and admin roles
+    if (req.user.role !== 'supervisor' && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Only supervisors and admins can add observation notes' });
+    }
+
+    const sn = parseInt(stepNumber);
+    if (!notes || typeof notes !== 'string') {
+      return res.status(400).json({ error: 'Notes text is required' });
+    }
+    if (notes.length > 2000) {
+      return res.status(400).json({ error: 'Notes must be under 2000 characters' });
+    }
+
+    // Upsert: create row if it doesn't exist, otherwise update supervisor_notes
+    const existing = await pool.query('SELECT id FROM case_step_history WHERE case_id=$1 AND step_number=$2', [id, sn]);
+    if (existing.rows.length === 0) {
+      // Create a new row with supervisor notes (step not completed)
+      await pool.query(
+        'INSERT INTO case_step_history (case_id, step_number, completed, supervisor_notes, supervisor_notes_by) VALUES ($1, $2, FALSE, $3, $4)',
+        [id, sn, notes, req.user.display_name || req.user.username]
+      );
+    } else {
+      await pool.query(
+        'UPDATE case_step_history SET supervisor_notes=$1, supervisor_notes_by=$2 WHERE case_id=$3 AND step_number=$4',
+        [notes, req.user.display_name || req.user.username, id, sn]
+      );
+    }
+
+    await audit(id, `STEP_${sn}_SUPERVISOR_NOTE`, req.user.username || 'system', null, { notes });
+
+    res.json({
+      message: 'Observation notes saved',
+      supervisor_notes: notes,
+      supervisor_notes_by: req.user.display_name || req.user.username
+    });
+  } catch (e) {
+    console.error('PUT supervisor-notes err:', e);
+    res.status(500).json({ error: 'Failed to save notes' });
+  }
+});
+
+// Admin only: Delete supervisor observation notes from a step
+app.delete('/api/cases/:id/steps/:stepNumber/supervisor-notes', authMw, requireRole('admin'), async (req, res) => {
+  try {
+    const {id, stepNumber} = req.params;
+    const sn = parseInt(stepNumber);
+
+    const existing = await pool.query('SELECT supervisor_notes, supervisor_notes_by FROM case_step_history WHERE case_id=$1 AND step_number=$2', [id, sn]);
+    if (!existing.rows.length || !existing.rows[0].supervisor_notes) {
+      return res.status(404).json({ error: 'No supervisor notes found for this step' });
+    }
+
+    const deletedNotes = existing.rows[0].supervisor_notes;
+
+    await pool.query(
+      'UPDATE case_step_history SET supervisor_notes=NULL, supervisor_notes_by=NULL WHERE case_id=$1 AND step_number=$2',
+      [id, sn]
+    );
+
+    await audit(id, `STEP_${sn}_SUPERVISOR_NOTE_DELETED`, req.user.username || 'system',
+      { supervisor_notes: deletedNotes },
+      { supervisor_notes: null }
+    );
+
+    res.json({ message: 'Supervisor notes deleted' });
+  } catch (e) {
+    console.error('DELETE supervisor-notes err:', e);
+    res.status(500).json({ error: 'Failed to delete notes' });
+  }
 });
 
 // Error handler
