@@ -334,12 +334,14 @@ app.get('/api/cases/:id', authMw, async (req, res) => {
 
 app.post('/api/cases', authMw, requireRole('admin'), async (req, res) => {
   try {
-    const {fir_number,cc_number,case_type,district_id,data_source,date_of_fir,victim_age,victim_gender,eligible_for_compensation,comp_type,comp_amount_approved,responsible_officer,responsible_agency,notes} = req.body;
+    const {fir_number,cc_number,case_type,district_id,data_source,date_of_fir,victim_age,victim_gender,eligible_for_compensation,comp_type,comp_amount_approved,responsible_officer,notes} = req.body;
     if (!fir_number||!case_type||!data_source||!date_of_fir) return res.status(400).json({error:'Missing required fields'});
-    const r = await pool.query(`INSERT INTO cases(fir_number,cc_number,case_type,district_id,data_source,date_of_fir,victim_age,victim_gender,eligible_for_compensation,comp_type,comp_amount_approved,responsible_officer,responsible_agency,notes,current_step,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,1,'ACTIVE') RETURNING *`,
-      [fir_number, cc_number||null, case_type, district_id||null, data_source, date_of_fir, victim_age||null, victim_gender||'Female', eligible_for_compensation!==false, comp_type||null, comp_amount_approved||null, responsible_officer||null, responsible_agency||null, notes||null]);
-    await pool.query(`INSERT INTO case_step_history(case_id,step_number,completed,completed_at,completed_by,notes) VALUES($1,1,TRUE,NOW(),$2,'FIR Registered')`, [r.rows[0].id, responsible_officer||'System']);
-    await audit(r.rows[0].id, 'CASE_CREATED', 'system', null, {fir_number,case_type});
+    const r = await pool.query(`INSERT INTO cases(fir_number,cc_number,case_type,district_id,data_source,date_of_fir,victim_age,victim_gender,eligible_for_compensation,comp_type,comp_amount_approved,responsible_officer,notes,current_step,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,1,'ACTIVE') RETURNING *`,
+      [fir_number, cc_number||null, case_type, district_id||null, data_source, date_of_fir, victim_age||null, victim_gender||'Female', eligible_for_compensation!==false, comp_type||null, comp_amount_approved||null, responsible_officer||null, notes||null]);
+    // Use the date_of_fir (or current time if not provided) as the completion date for Step 1 (FIR Registered)
+    const firDate = date_of_fir ? new Date(date_of_fir).toISOString() : new Date().toISOString();
+    await pool.query(`INSERT INTO case_step_history(case_id,step_number,completed,completed_at,completed_by,notes) VALUES($1,1,TRUE,$2,$3,'FIR Registered')`, [r.rows[0].id, firDate, responsible_officer||'System']);
+    await audit(r.rows[0].id, 'CASE_CREATED', req.user?.username || 'system', null, {fir_number,case_type});
     res.status(201).json({message:'Case created', case:r.rows[0]});
   } catch(e) { console.error('POST /api/cases err:', e); if (e.code==='23505') return res.status(409).json({error:'FIR exists'}); res.status(500).json({error:'Failed'}); }
 });
@@ -347,7 +349,7 @@ app.post('/api/cases', authMw, requireRole('admin'), async (req, res) => {
 app.put('/api/cases/:id', authMw, requireRole('admin'), async (req, res) => {
   try {
     const {id}=req.params;
-    const ALLOW = ['fir_number','cc_number','case_type','district_id','data_source','date_of_fir','victim_age','victim_gender','eligible_for_compensation','comp_type','comp_amount_approved','comp_amount_disbursed','current_step','status','responsible_officer','responsible_agency','notes'];
+    const ALLOW = ['fir_number','cc_number','case_type','district_id','data_source','date_of_fir','victim_age','victim_gender','eligible_for_compensation','comp_type','comp_amount_approved','comp_amount_disbursed','current_step','status','responsible_officer','notes'];
     const oldR = await pool.query('SELECT * FROM cases WHERE id=$1', [id]);
     if (!oldR.rows.length) return res.status(404).json({error:'Not found'});
     const f=[]; const p=[]; let i=1;
@@ -355,7 +357,7 @@ app.put('/api/cases/:id', authMw, requireRole('admin'), async (req, res) => {
     if (!f.length) return res.status(400).json({error:'No fields'});
     p.push(id);
     const r = await pool.query(`UPDATE cases SET ${f.join(',')}, updated_at=NOW() WHERE id=$${i} RETURNING *`, p);
-    await audit(id, 'CASE_UPDATED', 'system', oldR.rows[0], r.rows[0]);
+    await audit(id, 'CASE_UPDATED', req.user?.username || 'system', oldR.rows[0], r.rows[0]);
     await genAlert(id);
     res.json({message:'Updated', case:r.rows[0]});
   } catch(e) { console.error('PUT err:', e); res.status(500).json({error:'Failed'}); }
@@ -413,9 +415,9 @@ app.post('/api/cases/:id/steps/:stepNumber/complete', authMw, requireRole('admin
     const ex = await pool.query('SELECT * FROM case_step_history WHERE case_id=$1 AND step_number=$2', [id, sn]);
     if (ex.rows.length>0 && ex.rows[0].completed) return res.status(409).json({error:'Already completed'});
     if (ex.rows.length>0) {
-      await pool.query('UPDATE case_step_history SET completed=TRUE,completed_at=NOW(),completed_by=$2,notes=$3,documents_received=$4 WHERE id=$1', [ex.rows[0].id, completed_by||'system', notes||null, documents_received||null]);
+      await pool.query('UPDATE case_step_history SET completed=TRUE,completed_at=NOW(),completed_by=$2,notes=$3,documents_received=$4 WHERE id=$1', [ex.rows[0].id, completed_by||req.user?.username||'system', notes||null, documents_received||null]);
     } else {
-      await pool.query('INSERT INTO case_step_history(case_id,step_number,completed,completed_at,completed_by,notes,documents_received) VALUES($1,$2,TRUE,NOW(),$3,$4,$5)', [id, sn, completed_by||'system', notes||null, documents_received||null]);
+      await pool.query('INSERT INTO case_step_history(case_id,step_number,completed,completed_at,completed_by,notes,documents_received) VALUES($1,$2,TRUE,NOW(),$3,$4,$5)', [id, sn, completed_by||req.user?.username||'system', notes||null, documents_received||null]);
     }
     const next = Math.min(sn+1, 9);
     await pool.query('UPDATE cases SET current_step=$1,updated_at=NOW() WHERE id=$2', [next, id]);
@@ -426,7 +428,7 @@ app.post('/api/cases/:id/steps/:stepNumber/complete', authMw, requireRole('admin
       if (!isNaN(amount) && amount >= 0) {
         const oldRow = await pool.query('SELECT comp_amount_approved FROM cases WHERE id=$1', [id]);
         await pool.query('UPDATE cases SET comp_amount_approved=$1,updated_at=NOW() WHERE id=$2', [amount, id]);
-        await audit(id, 'AMOUNT_UPDATED', completed_by||'system', {comp_amount_approved: oldRow.rows[0]?.comp_amount_approved}, {comp_amount_approved: amount, updated_at_step: sn});
+        await audit(id, 'AMOUNT_UPDATED', completed_by||req.user?.username||'system', {comp_amount_approved: oldRow.rows[0]?.comp_amount_approved}, {comp_amount_approved: amount, updated_at_step: sn});
       }
     }
 
@@ -434,10 +436,10 @@ app.post('/api/cases/:id/steps/:stepNumber/complete', authMw, requireRole('admin
     const completedCount = await pool.query('SELECT COUNT(*) FROM case_step_history WHERE case_id=$1 AND completed=TRUE', [id]);
     if (parseInt(completedCount.rows[0].count) >= 9) {
       await pool.query("UPDATE cases SET status='PAID',updated_at=NOW() WHERE id=$1 AND status!='PAID'", [id]);
-      await audit(id, 'CASE_MARKED_PAID', completed_by||'system', null, {reason: 'All 9 steps completed'});
+      await audit(id, 'CASE_MARKED_PAID', completed_by||req.user?.username||'system', null, {reason: 'All 9 steps completed'});
     }
 
-    await audit(id, `STEP_${sn}_COMPLETED`, completed_by||'system', null, {step:sn});
+    await audit(id, `STEP_${sn}_COMPLETED`, completed_by||req.user?.username||'system', null, {step:sn});
     await genAlert(id);
     res.json({message:`Step ${sn} complete`, current_step:next});
   } catch(e) { console.error('POST step complete err:', e); res.status(500).json({error:'Failed'}); }
@@ -483,7 +485,7 @@ app.put('/api/cases/:id/steps/:stepNumber', authMw, requireRole('admin'), async 
     } else {
       await pool.query('UPDATE case_step_history SET notes=$2,delay_reason=$3,documents_received=$4 WHERE id=$1', [ex.rows[0].id, notes||ex.rows[0].notes, delay_reason||null, documents_received||null]);
     }
-    await audit(id, `STEP_${stepNumber}_UPDATED`, 'system', null, {notes});
+    await audit(id, `STEP_${stepNumber}_UPDATED`, req.user?.username || 'system', null, {notes});
     res.json({message:`Step ${stepNumber} updated`});
   } catch(e) { console.error('PUT step err:', e); res.status(500).json({error:'Failed'}); }
 });
@@ -499,12 +501,23 @@ app.get('/api/dashboard/stats', authMw, async (req, res) => {
     const stalled = await pool.query("SELECT COUNT(*) FROM cases WHERE status='STALLED'");
     const avgDays = await pool.query("SELECT AVG(EXTRACT(DAY FROM (csh.completed_at-c.date_of_fir))) avg_days FROM case_step_history csh JOIN cases c ON c.id=csh.case_id WHERE csh.step_number=9 AND csh.completed=TRUE");
     const stalledCases = await pool.query("SELECT c.id,c.fir_number,c.case_type,c.current_step,c.updated_at,d.name district_name FROM cases c LEFT JOIN districts d ON d.id=c.district_id WHERE c.status='STALLED' OR c.status='ACTIVE' ORDER BY c.updated_at ASC LIMIT 5");
+    // Also fetch recent unresolved alerts for the dashboard
+    const recentAlerts = await pool.query(`
+      SELECT a.id, a.alert_type, a.message, a.case_id, a.created_at, c.fir_number, c.case_type, c.current_step, c.status, d.name as district_name
+      FROM alerts a
+      JOIN cases c ON c.id = a.case_id
+      LEFT JOIN districts d ON d.id = c.district_id
+      WHERE a.is_resolved = FALSE
+      ORDER BY a.created_at DESC
+      LIMIT 10
+    `);
     res.json({
       total: parseInt(total.rows[0].count),
       byStatus: byStatus.rows, byType: byType.rows, byDistrict: byDistrict.rows,
       stalledCount: parseInt(stalled.rows[0].count),
       avgDaysToPayment: avgDays.rows[0]?.avg_days ? Math.round(parseFloat(avgDays.rows[0].avg_days)) : null,
-      stalledCases: stalledCases.rows
+      stalledCases: stalledCases.rows,
+      recentAlerts: recentAlerts.rows
     });
   } catch(e) { console.error('GET stats err:', e); res.status(500).json({error:'Failed'}); }
 });
@@ -518,15 +531,77 @@ app.get('/api/alerts', authMw, async (req, res) => {
     if (resolved==='true') w.push('is_resolved=TRUE');
     else if (!resolved||resolved==='false') w.push('is_resolved=FALSE');
     const ws = w.length ? 'WHERE '+w.join(' AND ') : '';
-    const r = await pool.query(`SELECT a.*,c.fir_number FROM alerts a JOIN cases c ON c.id=a.case_id ${ws} ORDER BY a.created_at DESC LIMIT 50`, p);
+    const r = await pool.query(`SELECT a.*,c.fir_number,c.case_type,c.current_step,c.status,d.name as district_name FROM alerts a JOIN cases c ON c.id=a.case_id LEFT JOIN districts d ON d.id=c.district_id ${ws} ORDER BY a.created_at DESC LIMIT 100`, p);
     res.json(r.rows);
   } catch(e) { console.error('GET alerts err:', e); res.status(500).json({error:'Failed'}); }
+});
+
+// Auto-check for cases with no step changes in 15+ days and generate STALLED_15D alerts
+app.post('/api/alerts/check-stagnation', authMw, async (req, res) => {
+  try {
+    const days = Math.max(1, parseInt(req.body.days) || 15);
+    
+    // Find cases with no update in N days, excluding paid/closed
+    const stagnantCases = await pool.query(`
+      SELECT c.id, c.fir_number, c.case_type, c.current_step, c.updated_at, c.status, d.name as district_name
+      FROM cases c
+      LEFT JOIN districts d ON d.id = c.district_id
+      WHERE c.updated_at < NOW() - ($1 || ' days')::INTERVAL
+        AND c.status NOT IN ('PAID', 'CLOSED')
+      ORDER BY c.updated_at ASC
+    `, [days]);
+
+    const created = [];
+    const alreadyExists = [];
+
+    for (const caseRow of stagnantCases.rows) {
+      // Check if an unresolved STALLED_15D alert already exists for this case
+      const existing = await pool.query(
+        'SELECT id FROM alerts WHERE case_id = $1 AND alert_type = $2 AND is_resolved = FALSE',
+        [caseRow.id, 'STALLED_15D']
+      );
+
+      if (existing.rows.length === 0) {
+        const daysSinceUpdate = Math.floor((Date.now() - new Date(caseRow.updated_at)) / 86400000);
+        const result = await pool.query(
+          `INSERT INTO alerts (case_id, alert_type, message) VALUES ($1, 'STALLED_15D', $2) RETURNING *`,
+          [caseRow.id, `Case ${caseRow.fir_number} has had no step changes for ${daysSinceUpdate} days (stuck at step ${caseRow.current_step}). Status: ${caseRow.status}`]
+        );
+        // Add case info to the returned alert
+        created.push({ ...result.rows[0], fir_number: caseRow.fir_number, case_type: caseRow.case_type, current_step: caseRow.current_step });
+      } else {
+        alreadyExists.push(caseRow.fir_number);
+      }
+    }
+
+    res.json({
+      checked: stagnantCases.rows.length,
+      created: created.length,
+      alreadyExists: alreadyExists.length,
+      newAlerts: created,
+      stagnantCases: stagnantCases.rows
+    });
+  } catch(e) {
+    console.error('POST check-stagnation err:', e);
+    res.status(500).json({error: 'Failed to check stagnation'});
+  }
 });
 
 app.post('/api/alerts/:id/resolve', authMw, async (req, res) => {
   try {
     const {id}=req.params;
-    await pool.query('UPDATE alerts SET is_resolved=TRUE,resolved_at=NOW(),resolved_by=$2 WHERE id=$1', [id, req.body.resolved_by||'system']);
+    // Fetch the alert before deleting for audit logging
+    const alertRow = await pool.query('SELECT case_id, alert_type, message FROM alerts WHERE id=$1', [id]);
+    if (alertRow.rows.length > 0) {
+      const a = alertRow.rows[0];
+      // Log the resolution in audit log before deleting
+      await audit(a.case_id, 'ALERT_RESOLVED', req.user?.username || 'system',
+        { alert_type: a.alert_type, message: a.message },
+        { resolved: true, resolved_by: req.user?.username || 'system' }
+      );
+      // Delete the alert from the table
+      await pool.query('DELETE FROM alerts WHERE id=$1', [id]);
+    }
     res.json({message:'Alert resolved'});
   } catch(e) { console.error('POST resolve err:', e); res.status(500).json({error:'Failed'}); }
 });

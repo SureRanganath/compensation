@@ -52,7 +52,6 @@ CREATE TABLE IF NOT EXISTS cases (
   current_step INT DEFAULT 1 CHECK (current_step BETWEEN 1 AND 9),
   status case_status DEFAULT 'ACTIVE',
   responsible_officer VARCHAR(200),
-  responsible_agency VARCHAR(200),
   notes TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -145,14 +144,14 @@ WITH district_ids AS (
   SELECT id, name FROM districts
 ),
 demo_cases AS (
-  INSERT INTO cases (fir_number, cc_number, case_type, district_id, data_source, date_of_fir, victim_age, eligible_for_compensation, comp_type, comp_amount_approved, comp_amount_disbursed, current_step, status, responsible_officer, responsible_agency, notes)
+  INSERT INTO cases (fir_number, cc_number, case_type, district_id, data_source, date_of_fir, victim_age, eligible_for_compensation, comp_type, comp_amount_approved, comp_amount_disbursed, current_step, status, responsible_officer, notes)
   VALUES
-    ('FIR-2024-001', 'CC-2024-001', 'POCSO', (SELECT id FROM district_ids WHERE name='Hyderabad'), 'BHAROSA', '2024-01-15', 14, TRUE, 'INTERIM_AND_FINAL', 500000, 200000, 9, 'PAID', 'Smt. Priya Sharma', 'DLSA Hyderabad', 'Victim A - Case fully resolved, compensation paid'),
-    ('FIR-2024-002', 'CC-2024-002', 'RAPE', (SELECT id FROM district_ids WHERE name='Warangal'), 'BHAROSA', '2024-03-10', 22, TRUE, 'INTERIM', 300000, 100000, 8, 'ACTIVE', 'Shri. Ramesh Kumar', 'SLSA Warangal', 'Victim B - Interim paid, awaiting final'),
-    ('FIR-2024-003', NULL, 'ITPA', (SELECT id FROM district_ids WHERE name='Rangareddy'), 'AHTU_PMU', '2024-04-20', 17, TRUE, 'INTERIM', 200000, NULL, 3, 'STALLED', 'Smt. Sunita Devi', 'AHTU PMU', 'Victim C - Stalled at DLSA notification'),
-    ('FIR-2024-004', 'CC-2024-003', 'RAPE', (SELECT id FROM district_ids WHERE name='Karimnagar'), 'ACP_LAW_ORDER', '2024-06-05', 25, TRUE, 'FINAL', 400000, 400000, 9, 'PAID', 'Shri. Vikram Singh', 'ACP Law & Order', 'Victim D - Fully paid'),
-    ('FIR-2024-005', NULL, 'POCSO', (SELECT id FROM district_ids WHERE name='Nizamabad'), 'BHAROSA', '2024-08-12', 13, TRUE, 'INTERIM_AND_FINAL', 600000, NULL, 5, 'UNDER_REVIEW', 'Smt. Anjali Reddy', 'DLSA Nizamabad', 'Victim E - Under review at collector level'),
-    ('FIR-2024-006', 'CC-2024-004', 'OTHER_CAW', (SELECT id FROM district_ids WHERE name='Khammam'), 'AHTU_PMU', '2024-09-01', 30, TRUE, 'SPECIAL', 250000, NULL, 2, 'ACTIVE', 'Shri. Mohan Rao', 'AHTU PMU Khammam', 'Victim F - IO collecting documents')
+    ('FIR-2024-001', 'CC-2024-001', 'POCSO', (SELECT id FROM district_ids WHERE name='Hyderabad'), 'BHAROSA', '2024-01-15', 14, TRUE, 'INTERIM_AND_FINAL', 500000, 200000, 9, 'PAID', 'Smt. Priya Sharma', 'Victim A - Case fully resolved, compensation paid'),
+    ('FIR-2024-002', 'CC-2024-002', 'RAPE', (SELECT id FROM district_ids WHERE name='Warangal'), 'BHAROSA', '2024-03-10', 22, TRUE, 'INTERIM', 300000, 100000, 8, 'ACTIVE', 'Shri. Ramesh Kumar', 'Victim B - Interim paid, awaiting final'),
+    ('FIR-2024-003', NULL, 'ITPA', (SELECT id FROM district_ids WHERE name='Rangareddy'), 'AHTU_PMU', '2024-04-20', 17, TRUE, 'INTERIM', 200000, NULL, 3, 'STALLED', 'Smt. Sunita Devi', 'Victim C - Stalled at DLSA notification'),
+    ('FIR-2024-004', 'CC-2024-003', 'RAPE', (SELECT id FROM district_ids WHERE name='Karimnagar'), 'ACP_LAW_ORDER', '2024-06-05', 25, TRUE, 'FINAL', 400000, 400000, 9, 'PAID', 'Shri. Vikram Singh', 'Victim D - Fully paid'),
+    ('FIR-2024-005', NULL, 'POCSO', (SELECT id FROM district_ids WHERE name='Nizamabad'), 'BHAROSA', '2024-08-12', 13, TRUE, 'INTERIM_AND_FINAL', 600000, NULL, 5, 'UNDER_REVIEW', 'Smt. Anjali Reddy', 'Victim E - Under review at collector level'),
+    ('FIR-2024-006', 'CC-2024-004', 'OTHER_CAW', (SELECT id FROM district_ids WHERE name='Khammam'), 'AHTU_PMU', '2024-09-01', 30, TRUE, 'SPECIAL', 250000, NULL, 2, 'ACTIVE', 'Shri. Mohan Rao', 'Victim F - IO collecting documents')
   RETURNING id, fir_number, current_step
 )
 SELECT * FROM demo_cases;

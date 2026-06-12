@@ -216,6 +216,13 @@ export async function getDashboardStats() {
 
 // ─── ALERTS ───────────────────────────────────────────────────
 
+export async function checkStagnation(days = 15) {
+  return request('/alerts/check-stagnation', {
+    method: 'POST',
+    body: JSON.stringify({ days })
+  });
+}
+
 export async function getAlerts(filters = {}) {
   const { type, resolved } = filters;
   const params = new URLSearchParams();
@@ -300,7 +307,7 @@ const api = {
   getCases, getCase, createCase, updateCase, deleteCase, markCaseAsPaid,
   getCaseSteps, completeStep, revertStep, updateStep,
   getDashboardStats,
-  getAlerts, resolveAlert,
+  checkStagnation, getAlerts, resolveAlert,
   getWorkflowSteps,
   searchCases,
   getDistricts,
